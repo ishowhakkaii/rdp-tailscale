@@ -1,45 +1,53 @@
-name: Windows RDP (Tailscale Stable)
+name: Windows RDP + Tailscale
 
 on:
   workflow_dispatch:
+    inputs:
+      duration_hours:
+        description: 'Keep session alive for (hours)'
+        required: false
+        default: '4'
 
 jobs:
-  rdp:
+  rdp-session:
     runs-on: windows-latest
     timeout-minutes: 360
-
+    
     steps:
-    - name: Enable RDP + Create User
-      run: |
-        net user runneradmin StrongPass123! /add || echo "user exists"
-        net localgroup administrators runneradmin /add || echo "already admin"
-        net localgroup "Remote Desktop Users" runneradmin /add || echo "already added"
+      - name: Set Variables
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          echo "RUNNER_USER=runneradmin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "RUNNER_PASS=$(New-Guid)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          echo "TAILSCALE_AUTH_KEY=${{ secrets.TAILSCALE_AUTH_KEY }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
-
-        sc config TermService start= auto
-        net start TermService || echo "service already running"
-
-    - name: Install Tailscale
-      run: |
-        choco install tailscale -y
-
-    - name: Start Tailscale Service
-      run: |
-        Start-Service Tailscale
-        Start-Sleep -Seconds 10
-
-    - name: Connect Tailscale
-      run: |
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey tskey-auth-kBVhLEattT11CNTRL-XtTHZsvrGoJ7sQbBXDt4pJZbEXpUNNPqF --hostname github-rdp --unattended
-
-    - name: Show IP
-      run: |
-        & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-        echo "User: runneradmin"
-        echo "Password: StrongPass123!"
-
-    - name: Keep Alive
-      run: |
-        Start-Sleep -Seconds 21600
+      - name: Create Local Admin User
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $user = $env:RUNNER_USER
+          $pass = $env:RUNNER_PASS | ConvertTo-SecureString -AsPlainText -Force
+          
+          # Check if user exists
+          $exists = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+          
+          if (-not $exists) {
+            New-LocalUser -Name $user -Password $pass -FullName "Runner Admin" -Description "GitHub Actions Runner" -ErrorAction SilentlyContinue
+            Write-Host "User created: $user"
+          } else {
+            Write-Host "User already exists: $user"
+            Set-LocalUser -Name $user -Password $pass -ErrorAction SilentlyContinue
+          }
+          
+          # Add to Administrators group
+          $group = [ADSI]"WinNT://./Administrators"
+          $member = [ADSI]"WinNT://./$user"
+          
+          try {
+            $group.Add($member.Path)
+            Write-Host "Added $user to Administrators"
+          } catch {
+            if ($_.Exception.Message -like "*already a member*") {
+              Write-Host "$user already in Administrators"
+            } else {
