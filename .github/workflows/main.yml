@@ -1,68 +1,175 @@
-name: Windows RDP + Tailscale
+name: Windows RDP via Tailscale
 
 on:
   workflow_dispatch:
     inputs:
-      duration_hours:
-        description: 'Keep session alive for (hours)'
+      session_duration_hours:
+        description: "Session duration in hours (max 5)"
         required: false
-        default: '4'
+        default: "3"
 
 jobs:
   rdp-session:
     runs-on: windows-latest
     timeout-minutes: 360
-    
+
     steps:
-      - name: Set Variables
+      # ── 1. Set RDP password from secret ───────────────────────────────────
+      - name: Set RDP password
         shell: pwsh
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
-          $ErrorActionPreference = 'Continue'
-          echo "RUNNER_USER=runneradmin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "RUNNER_PASS=$(New-Guid)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          echo "TAILSCALE_AUTH_KEY=${{ secrets.TAILSCALE_AUTH_KEY }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $password = $env:RDP_PASSWORD
+          if (-not $password) {
+            Write-Error "Secret RDP_PASSWORD is not set. Aborting."
+            exit 1
+          }
+          # Store for later steps via GITHUB_ENV
+          "RDP_PASSWORD=$password" | Out-File -Append $env:GITHUB_ENV
 
-      - name: Create Local Admin User
+      # ── 2. Create / update the local admin user ───────────────────────────
+      - name: Configure local admin user
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $user = $env:RUNNER_USER
-          $pass = $env:RUNNER_PASS | ConvertTo-SecureString -AsPlainText -Force
-          
-          $exists = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
-          
-          if (-not $exists) {
-            New-LocalUser -Name $user -Password $pass -FullName "Runner Admin" -Description "GitHub Actions Runner" -ErrorAction SilentlyContinue
-            Write-Host "User created: $user"
+          $username = "runneradmin"
+          $password  = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+
+          $existing = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          if ($existing) {
+            Set-LocalUser -Name $username -Password $password -PasswordNeverExpires $true
+            Write-Host "User '$username' already existed – password updated."
           } else {
-            Set-LocalUser -Name $user -Password $pass -ErrorAction SilentlyContinue
-            Write-Host "User password updated: $user"
-          }
-          
-          $group = [ADSI]"WinNT://./Administrators"
-          $member = [ADSI]"WinNT://./$user"
-          
-          try {
-            $group.Add($member.Path)
-            Write-Host "Added $user to Administrators"
-          } catch {
-            Write-Host "User already in Administrators or error: $_"
+            New-LocalUser -Name $username -Password $password `
+                          -FullName "Runner Admin" `
+                          -Description "RDP session account" `
+                          -PasswordNeverExpires
+            Write-Host "User '$username' created."
           }
 
+          # Ensure membership in Administrators and Remote Desktop Users
+          foreach ($group in @("Administrators", "Remote Desktop Users")) {
+            $members = Get-LocalGroupMember -Group $group -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -like "*$username*" }
+            if (-not $members) {
+              Add-LocalGroupMember -Group $group -Member $username
+              Write-Host "Added '$username' to '$group'."
+            } else {
+              Write-Host "'$username' is already in '$group'."
+            }
+          }
+
+      # ── 3. Enable Remote Desktop ──────────────────────────────────────────
       - name: Enable RDP
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
-          Write-Host "RDP enabled"
+          # Allow RDP connections
+          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+                           -Name "fDenyTSConnections" -Value 0 -Type DWord
 
+          # Disable NLA (Network Level Authentication) so plain-password RDP works
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" -Value 0 -Type DWord
+
+          # Open firewall
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+
+          # Make sure TermService is running
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service  -Name TermService -ErrorAction SilentlyContinue
+
+          Write-Host "RDP enabled and firewall rule applied."
+
+      # ── 4. Install Tailscale ──────────────────────────────────────────────
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Continue'
-          $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
-          
-          if (-not (Test-Path $tsPath)) {
-            Write-Host "Downloading Tailscale..."
-            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env
+          $installer = "$env:TEMP\tailscale-setup.exe"
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
+
+          Write-Host "Downloading Tailscale…"
+          Invoke-WebRequest -Uri $url -OutFile $installer -UseBasicParsing
+
+          Write-Host "Installing Tailscale (silent)…"
+          Start-Process -FilePath $installer -ArgumentList "/S" -Wait -NoNewWindow
+
+          # Give the service a moment to register
+          Start-Sleep -Seconds 8
+
+          # Verify the binary is reachable
+          $ts = Get-Command tailscale -ErrorAction SilentlyContinue
+          if (-not $ts) {
+            # Fallback: add the default install path
+            $tsPath = "C:\Program Files\Tailscale"
+            $env:PATH = "$tsPath;$env:PATH"
+            [System.Environment]::SetEnvironmentVariable(
+              "PATH", $env:PATH, [System.EnvironmentVariableTarget]::Process)
+          }
+          tailscale version
+
+      # ── 5. Connect to Tailscale ───────────────────────────────────────────
+      - name: Connect Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if (-not $env:TAILSCALE_AUTHKEY) {
+            Write-Error "Secret TAILSCALE_AUTHKEY is not set. Aborting."
+            exit 1
+          }
+
+          # Ensure the service is running
+          $svc = Get-Service -Name Tailscale -ErrorAction SilentlyContinue
+          if ($svc -and $svc.Status -ne "Running") {
+            Start-Service Tailscale
+            Start-Sleep -Seconds 5
+          }
+
+          Write-Host "Authenticating with Tailscale…"
+          tailscale up --authkey=$env:TAILSCALE_AUTHKEY `
+                       --hostname="gh-actions-rdp" `
+                       --accept-routes `
+                       --unattended
+
+          # Wait for the 100.x address to appear (up to 60 s)
+          $ip = $null
+          for ($i = 0; $i -lt 12; $i++) {
+            Start-Sleep -Seconds 5
+            $status = tailscale status --json | ConvertFrom-Json -ErrorAction SilentlyContinue
+            $ip = $status.Self.TailscaleIPs |
+                  Where-Object { $_ -match "^100\." } |
+                  Select-Object -First 1
+            if ($ip) { break }
+          }
+
+          if ($ip) {
+            Write-Host ""
+            Write-Host "========================================="
+            Write-Host "  Tailscale IP : $ip"
+            Write-Host "  RDP User     : runneradmin"
+            Write-Host "  Connect with : mstsc /v:${ip}"
+            Write-Host "========================================="
+          } else {
+            Write-Warning "Tailscale IP not detected after 60 s – check your auth key / ACLs."
+            tailscale status
+          }
+
+      # ── 6. Keep session alive ─────────────────────────────────────────────
+      - name: Keep session alive
+        shell: pwsh
+        run: |
+          $hours   = [int]"${{ github.event.inputs.session_duration_hours }}"
+          if ($hours -lt 1 -or $hours -gt 5) { $hours = 3 }
+          $seconds = $hours * 3600
+
+          Write-Host "Session will stay alive for $hours hour(s). Connect via RDP now."
+          Write-Host "Workflow times out at 360 min (6 h) regardless."
+
+          $end = (Get-Date).AddSeconds($seconds)
+          while ((Get-Date) -lt $end) {
+            $remaining = [int]($end - (Get-Date)).TotalMinutes
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')]  $remaining min remaining…"
+            Start-Sleep -Seconds 60
+          }
+          Write-Host "Session time elapsed. Workflow ending."
