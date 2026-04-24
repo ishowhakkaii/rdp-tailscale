@@ -29,18 +29,16 @@ jobs:
           $user = $env:RUNNER_USER
           $pass = $env:RUNNER_PASS | ConvertTo-SecureString -AsPlainText -Force
           
-          # Check if user exists
           $exists = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
           
           if (-not $exists) {
             New-LocalUser -Name $user -Password $pass -FullName "Runner Admin" -Description "GitHub Actions Runner" -ErrorAction SilentlyContinue
             Write-Host "User created: $user"
           } else {
-            Write-Host "User already exists: $user"
             Set-LocalUser -Name $user -Password $pass -ErrorAction SilentlyContinue
+            Write-Host "User password updated: $user"
           }
           
-          # Add to Administrators group
           $group = [ADSI]"WinNT://./Administrators"
           $member = [ADSI]"WinNT://./$user"
           
@@ -48,6 +46,23 @@ jobs:
             $group.Add($member.Path)
             Write-Host "Added $user to Administrators"
           } catch {
-            if ($_.Exception.Message -like "*already a member*") {
-              Write-Host "$user already in Administrators"
-            } else {
+            Write-Host "User already in Administrators or error: $_"
+          }
+
+      - name: Enable RDP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0 -ErrorAction SilentlyContinue
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" -ErrorAction SilentlyContinue
+          Write-Host "RDP enabled"
+
+      - name: Install Tailscale
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tsPath = "C:\Program Files\Tailscale\tailscale.exe"
+          
+          if (-not (Test-Path $tsPath)) {
+            Write-Host "Downloading Tailscale..."
+            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "$env
