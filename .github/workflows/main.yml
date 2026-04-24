@@ -1,4 +1,4 @@
-name: Windows RDP (Tailscale - Fixed)
+name: Windows RDP (Tailscale Final)
 
 on:
   workflow_dispatch:
@@ -39,4 +39,4 @@ jobs:
 
     - name: Keep Alive
       run: |
-        timeout /t 21600
+        Start-Sleep -Seconds 21600
