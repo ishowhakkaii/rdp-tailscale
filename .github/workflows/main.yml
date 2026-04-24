@@ -1,4 +1,4 @@
-name: Windows RDP (Tailscale Final)
+name: Windows RDP (Tailscale Final Fixed)
 
 on:
   workflow_dispatch:
@@ -11,12 +11,17 @@ jobs:
     steps:
     - name: Enable RDP + Create User
       run: |
-        net user runneradmin P@ssw0rd123 /add
+        net user runneradmin StrongPass123! /add
         net localgroup administrators runneradmin /add
         net localgroup "Remote Desktop Users" runneradmin /add
 
+        wmic useraccount where name='runneradmin' set PasswordExpires=FALSE
+
         reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
         netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+
+        sc config TermService start= auto
+        net start TermService
 
     - name: Install Tailscale
       run: |
@@ -29,13 +34,13 @@ jobs:
 
     - name: Connect Tailscale
       run: |
-        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey tskey-auth-kd9EgNGcvW11CNTRL-FHxafficReRdZJJxhobddRCD2GHMM83w --hostname github-rdp --unattended
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey tskey-auth-kBVhLEattT11CNTRL-XtTHZsvrGoJ7sQbBXDt4pJZbEXpUNNPqF --hostname github-rdp --unattended
 
     - name: Show IP
       run: |
         & "C:\Program Files\Tailscale\tailscale.exe" ip -4
         echo "User: runneradmin"
-        echo "Password: P@ssw0rd123"
+        echo "Password: StrongPass123!"
 
     - name: Keep Alive
       run: |
