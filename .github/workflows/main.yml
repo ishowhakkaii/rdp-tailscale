@@ -1,0 +1,37 @@
+name: Windows RDP (Tailscale)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+    - name: Enable RDP + Create User
+      run: |
+        net user runneradmin P@ssw0rd123 /add
+        net localgroup administrators runneradmin /add
+        net localgroup "Remote Desktop Users" runneradmin /add
+
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+
+    - name: Install Tailscale
+      run: |
+        choco install tailscale -y
+
+    - name: Connect Tailscale
+      run: |
+        & "C:\Program Files\Tailscale\tailscale.exe" up --tskey-auth-kirnsWRF3H11CNTRL-PtLtxqV1VhYyAsywsHhMiYnc5A7TQYTcg --hostname github-rdp
+
+    - name: Show IP
+      run: |
+        & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        echo "User: runneradmin"
+        echo "Password: P@ssw0rd123"
+
+    - name: Keep Alive
+      run: |
+        timeout /t 21600
