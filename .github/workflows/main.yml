@@ -1,4 +1,4 @@
-name: Windows RDP (Tailscale)
+name: Windows RDP (Tailscale - Fixed)
 
 on:
   workflow_dispatch:
@@ -22,9 +22,14 @@ jobs:
       run: |
         choco install tailscale -y
 
+    - name: Start Tailscale Service
+      run: |
+        Start-Service Tailscale
+        Start-Sleep -Seconds 10
+
     - name: Connect Tailscale
       run: |
-        & "C:\Program Files\Tailscale\tailscale.exe" up --tskey-auth-kirnsWRF3H11CNTRL-PtLtxqV1VhYyAsywsHhMiYnc5A7TQYTcg --hostname github-rdp
+        & "C:\Program Files\Tailscale\tailscale.exe" up --authkey tskey-auth-kirnsWRF3H11CNTRL-PtLtxqV1VhYyAsywsHhMiYnc5A7TQYTcg --hostname github-rdp --unattended
 
     - name: Show IP
       run: |
