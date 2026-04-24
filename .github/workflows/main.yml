@@ -1,4 +1,4 @@
-name: Windows RDP (Tailscale Clean)
+name: Windows RDP (Tailscale Stable)
 
 on:
   workflow_dispatch:
@@ -11,15 +11,15 @@ jobs:
     steps:
     - name: Enable RDP + Create User
       run: |
-        net user runneradmin StrongPass123! /add
-        net localgroup administrators runneradmin /add
-        net localgroup "Remote Desktop Users" runneradmin /add
+        net user runneradmin StrongPass123! /add || echo "user exists"
+        net localgroup administrators runneradmin /add || echo "already admin"
+        net localgroup "Remote Desktop Users" runneradmin /add || echo "already added"
 
         reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
         netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
 
         sc config TermService start= auto
-        net start TermService
+        net start TermService || echo "service already running"
 
     - name: Install Tailscale
       run: |
